@@ -9,7 +9,12 @@ REPORT_SCRIPT="$SCRIPT_DIR/daily-report.sh"
 
 echo "=== 日报自动化 · 初始化 ==="
 echo ""
-echo "以下所有配置项都可以留空跳过，之后随时编辑 $CONF_FILE 修改。"
+echo "选择安装模式："
+echo "  1) 快速模式 — 全部用默认值，10 秒装完，之后随时改配置"
+echo "  2) 完整模式 — 逐项配置，解锁团队摘要、IM 私聊、定时触发等"
+echo ""
+read -rp "选择 [1/2，默认 1]: " setup_mode
+setup_mode="${setup_mode:-1}"
 echo ""
 
 # --- 前置依赖 ---
@@ -43,6 +48,18 @@ user_open_id=$(echo "$auth_status" | jq -r '.userOpenId // ""')
 echo "✓ 已认证为: $user_name ($user_open_id)"
 
 # --- 个性化配置（全部可选） ---
+
+workspace_dir=""
+report_folder=""
+permission_list=""
+im_include_p2p="false"
+team_wiki_node=""
+team_space_id=""
+watch_list=""
+my_role=""
+install_cron="n"
+
+if [[ "$setup_mode" == "2" ]]; then
 
 echo ""
 echo "--- 1/6 工作区路径（可选）---"
@@ -122,10 +139,11 @@ fi
 
 echo ""
 echo "--- 6/6 定时触发（可选）---"
-install_cron="n"
 if [[ "$(uname)" == "Darwin" ]]; then
     read -rp "是否安装每日 18:00 自动生成草稿日报？[y/N]: " install_cron
 fi
+
+fi  # end of setup_mode == "2"
 
 # --- 写入配置 ---
 
