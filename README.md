@@ -5,7 +5,7 @@
 ## 安装
 
 ```bash
-git clone https://github.com/你的组织/daily-report-skill ~/.agents/skills/daily-report
+git clone https://github.com/LawrenceChiu95/daily-report-skill ~/.agents/skills/daily-report
 bash ~/.agents/skills/daily-report/scripts/setup.sh
 ```
 
