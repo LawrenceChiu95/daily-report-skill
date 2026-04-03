@@ -5,14 +5,15 @@ SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT_DIR="$SKILL_DIR/scripts"
 CONF_DIR="$HOME/.config/daily-report"
 CONF_FILE="$CONF_DIR/config"
-LAUNCHAGENT_LABEL="com.$(whoami).daily-report"
-LAUNCHAGENT_PLIST="$HOME/Library/LaunchAgents/${LAUNCHAGENT_LABEL}.plist"
 REPORT_SCRIPT="$SCRIPT_DIR/daily-report.sh"
 
 echo "=== 日报自动化 · 初始化 ==="
 echo ""
+echo "以下所有配置项都可以留空跳过，之后随时编辑 $CONF_FILE 修改。"
+echo ""
 
-# Step 1: Check lark-cli
+# --- 前置依赖 ---
+
 if ! command -v lark-cli &>/dev/null; then
     echo "lark-cli 未安装，尝试自动安装..."
     if command -v npm &>/dev/null; then
@@ -27,15 +28,13 @@ if ! command -v lark-cli &>/dev/null; then
         exit 1
     fi
 fi
-
 echo "✓ lark-cli 已安装"
 
-# Step 2: Check auth
 auth_status=$(lark-cli auth status 2>&1) || true
 token_status=$(echo "$auth_status" | jq -r '.tokenStatus // "unknown"' 2>/dev/null)
 if [[ "$token_status" != "valid" ]]; then
     echo "需要飞书认证，正在发起授权..."
-    lark-cli auth login --domain calendar,task,docs,drive,contact
+    lark-cli auth login --domain calendar,task,doc,drive,contact
     auth_status=$(lark-cli auth status 2>&1)
 fi
 
@@ -43,28 +42,21 @@ user_name=$(echo "$auth_status" | jq -r '.userName // ""')
 user_open_id=$(echo "$auth_status" | jq -r '.userOpenId // ""')
 echo "✓ 已认证为: $user_name ($user_open_id)"
 
-# Step 3: Configure workspace
+# --- 个性化配置（全部可选） ---
+
 echo ""
-echo "--- 工作区路径 ---"
-echo "日报会从工作区中提取文件变更记录。"
-echo "输入你的主要工作区路径（留空跳过）："
-echo ""
-read -rp "工作区路径: " workspace_input
+echo "--- 1/6 工作区路径（可选）---"
+echo "用于提取工作区文件变更记录。"
+read -rp "工作区路径 [留空跳过]: " workspace_input
 workspace_dir="${workspace_input:-}"
 
-# Step 4: Configure report folder
 echo ""
-echo "--- 日报存放位置 ---"
-echo "日报文档将创建到飞书云空间。你可以："
-echo "  1) 创建在个人空间根目录（默认）"
-echo "  2) 指定已有的飞书文件夹（输入 folder_token 或文件夹 URL）"
-echo ""
-read -rp "选择 [1/2，默认 1]: " folder_choice
-folder_choice="${folder_choice:-1}"
-
+echo "--- 2/6 日报存放位置（可选）---"
+echo "日报默认创建在飞书个人空间根目录。"
+echo "如需指定文件夹，输入飞书文件夹 URL 或 token。"
+read -rp "文件夹 [留空用默认位置]: " folder_input
 report_folder=""
-if [[ "$folder_choice" == "2" ]]; then
-    read -rp "请输入文件夹 token 或 URL: " folder_input
+if [[ -n "$folder_input" ]]; then
     if [[ "$folder_input" == *"/drive/folder/"* ]]; then
         report_folder=$(echo "$folder_input" | sed 's|.*/drive/folder/||;s|[?#].*||')
     else
@@ -73,19 +65,15 @@ if [[ "$folder_choice" == "2" ]]; then
     echo "✓ 文件夹 token: $report_folder"
 fi
 
-# Step 5: Configure permission list
 echo ""
-echo "--- 权限自动授予 ---"
-echo "创建日报后自动给谁授予阅读权限？"
-echo "输入 open_id 列表（空格分隔），留空则跳过。"
-echo "提示：可用 lark-cli contact +search \"姓名\" 查找 open_id"
-echo ""
-read -rp "open_id 列表: " permission_input
+echo "--- 3/6 权限自动授予（可选）---"
+echo "日报创建后自动给谁授予阅读权限？"
+echo "提示：lark-cli contact +search \"姓名\" 可查 open_id"
+read -rp "open_id 列表，空格分隔 [留空跳过]: " permission_input
 permission_list="${permission_input:-}"
 
-# Step 6: IM scope
 echo ""
-echo "--- IM 采集范围 ---"
+echo "--- 4/6 IM 采集范围（可选）---"
 echo "日报数据采集默认只读群聊消息。"
 read -rp "是否也采集私聊消息？[y/N]: " im_p2p_input
 im_include_p2p="false"
@@ -93,14 +81,11 @@ if [[ "${im_p2p_input:-n}" =~ ^[Yy] ]]; then
     im_include_p2p="true"
 fi
 
-# Step 7: Team digest (optional)
 echo ""
-echo "--- 团队日报摘要（可选）---"
+echo "--- 5/6 团队日报摘要（可选）---"
 echo "配置后可以说「看看大家今天做了什么」，自动读取团队日报并提取跟你相关的内容。"
-echo ""
-echo "请粘贴团队日报的飞书知识库链接（留空跳过）："
-echo "就是大家写日报的那个知识库页面的 URL，格式如 https://xxx.feishu.cn/wiki/xxxxx"
-read -rp "链接或 token: " team_input
+echo "粘贴团队日报的飞书知识库链接，格式如 https://xxx.feishu.cn/wiki/xxxxx"
+read -rp "链接或 token [留空跳过]: " team_input
 team_wiki_node=""
 team_space_id=""
 watch_list=""
@@ -114,58 +99,74 @@ if [[ -n "$team_input" ]]; then
     fi
 
     echo "正在查询知识空间信息..."
-    local node_info
-    node_info=$(lark-cli wiki spaces get_node --params "{\"token\":\"$team_wiki_node\"}" 2>/dev/null)
+    node_info=$(lark-cli wiki spaces get_node --params "{\"token\":\"$team_wiki_node\"}" 2>/dev/null) || node_info='{}'
     team_space_id=$(echo "$node_info" | jq -r '.data.node.space_id // ""' 2>/dev/null)
-    local node_title
     node_title=$(echo "$node_info" | jq -r '.data.node.title // ""' 2>/dev/null)
 
     if [[ -z "$team_space_id" ]]; then
-        echo "⚠ 无法自动获取 space_id，请手动输入："
+        echo "⚠ 无法自动获取 space_id，请手动输入（留空跳过）："
         read -rp "space_id: " team_space_id
     else
         echo "✓ 已识别：「${node_title}」(space: ${team_space_id})"
     fi
 
     echo ""
-    echo "你想重点关注谁的日报？（逗号分隔，留空则全部由 AI 判断）"
-    read -rp "关注的人: " watch_input
+    read -rp "重点关注谁的日报？逗号分隔 [留空则全部由 AI 判断]: " watch_input
     watch_list="${watch_input:-}"
     echo ""
-    echo "用一句话描述你的工作职责（AI 用这个判断哪些日报跟你相关，留空也可以）"
+    echo "用一句话描述你的工作职责（AI 用这个判断哪些日报跟你相关）"
     echo "例：TapTap 社区负责人，管社区运营、评价、GameJam"
-    read -rp "职责描述: " role_input
+    read -rp "职责描述 [留空跳过]: " role_input
     my_role="${role_input:-}"
 fi
 
-# Step 8: Write config
+echo ""
+echo "--- 6/6 定时触发（可选）---"
+install_cron="n"
+if [[ "$(uname)" == "Darwin" ]]; then
+    read -rp "是否安装每日 18:00 自动生成草稿日报？[y/N]: " install_cron
+fi
+
+# --- 写入配置 ---
+
 mkdir -p "$CONF_DIR"
 cat > "$CONF_FILE" << CONFEOF
 # 日报自动化配置文件（由 setup 脚本生成于 $(date +%Y-%m-%d)）
+# 所有配置项都可以留空，留空则使用默认值或跳过对应功能。
+# 修改后立即生效，无需重新运行 setup。
 
-REPORT_FOLDER="$report_folder"
-
+# 飞书账号（自动填充）
 USER_OPEN_ID="$user_open_id"
 USER_NAME="$user_name"
 
+# 工作区路径（用于提取文件变更，留空则跳过）
+WORKSPACE_DIR="$workspace_dir"
+
+# 日报存放位置（留空则创建在个人空间根目录）
+REPORT_FOLDER="$report_folder"
+
+# 创建日报后自动授予 view 权限的 open_id 列表（空格分隔，留空则不授权）
 PERMISSION_LIST="$permission_list"
 
 # IM 采集范围：true = 群聊+私聊，false = 仅群聊
 IM_INCLUDE_P2P="$im_include_p2p"
 
-# 团队日报摘要
+# 团队日报摘要（留空则不启用 digest 功能）
 TEAM_WIKI_NODE="$team_wiki_node"
 TEAM_SPACE_ID="$team_space_id"
-WATCH_LIST="$watch_list"
-MY_ROLE="$my_role"
 
-WORKSPACE_DIR="$workspace_dir"
+# 重点关注的人（逗号分隔，留空则全部由 AI 判断）
+WATCH_LIST="$watch_list"
+
+# 你的工作职责（一句话，AI 用来判断哪些日报跟你相关，留空也可以）
+MY_ROLE="$my_role"
 CONFEOF
 
 echo ""
 echo "✓ 配置已写入: $CONF_FILE"
 
-# Step 7: Multi-agent compatibility
+# --- Agent 兼容配置（自动，无需用户操作） ---
+
 echo ""
 echo "--- Agent 兼容配置 ---"
 
@@ -272,14 +273,13 @@ if [[ "$agent_count" -eq 0 ]]; then
     echo "  你可以直接用命令行运行脚本，或安装任意 Agent 后重新运行 setup"
 fi
 
-# Step 8: LaunchAgent (optional, macOS only)
-if [[ "$(uname)" == "Darwin" ]]; then
-    echo ""
-    echo "--- 定时触发（可选）---"
-    read -rp "是否安装每日 18:00 自动生成草稿日报？[y/N]: " install_cron
-    if [[ "${install_cron:-n}" =~ ^[Yy] ]]; then
-        mkdir -p "$(dirname "$LAUNCHAGENT_PLIST")"
-        cat > "$LAUNCHAGENT_PLIST" << PLISTEOF
+# --- 定时触发 ---
+
+if [[ "${install_cron:-n}" =~ ^[Yy] ]]; then
+    LAUNCHAGENT_LABEL="com.$(whoami).daily-report"
+    LAUNCHAGENT_PLIST="$HOME/Library/LaunchAgents/${LAUNCHAGENT_LABEL}.plist"
+    mkdir -p "$(dirname "$LAUNCHAGENT_PLIST")"
+    cat > "$LAUNCHAGENT_PLIST" << PLISTEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -312,25 +312,26 @@ if [[ "$(uname)" == "Darwin" ]]; then
 </dict>
 </plist>
 PLISTEOF
-        launchctl unload "$LAUNCHAGENT_PLIST" 2>/dev/null || true
-        launchctl load "$LAUNCHAGENT_PLIST"
-        echo "✓ LaunchAgent 已安装，每日 18:00 自动生成草稿日报"
-        echo "  日志位置: /tmp/daily-report.log"
-        echo "  卸载命令: launchctl unload $LAUNCHAGENT_PLIST"
-    fi
+    launchctl unload "$LAUNCHAGENT_PLIST" 2>/dev/null || true
+    launchctl load "$LAUNCHAGENT_PLIST"
+    echo ""
+    echo "✓ LaunchAgent 已安装，每日 18:00 自动生成草稿日报"
+    echo "  日志位置: /tmp/daily-report.log"
+    echo "  卸载命令: launchctl unload $LAUNCHAGENT_PLIST"
 fi
+
+# --- 完成 ---
 
 echo ""
 echo "=== 初始化完成 ==="
 echo ""
 echo "使用方法："
-echo "  bash $REPORT_SCRIPT collect        # 查看今日数据"
-echo "  bash $REPORT_SCRIPT auto            # 一键生成日报"
-echo "  bash $REPORT_SCRIPT auto --draft    # 生成草稿日报"
+echo "  对 AI 说「写日报」           # 交互式生成（推荐）"
+echo "  对 AI 说「看看大家今天做了什么」 # 团队日报摘要"
+echo "  bash $REPORT_SCRIPT auto    # 命令行一键生成"
 echo ""
-echo "在 AI Agent 中说「写日报」即可触发交互式日报流程。"
-echo ""
-echo "详细使用指南：cat ~/.agents/skills/daily-report/references/quickstart.md"
+echo "修改配置：$CONF_FILE"
+echo "详细使用指南：cat $SKILL_DIR/references/quickstart.md"
 
 cat << 'COFFEE'
 
