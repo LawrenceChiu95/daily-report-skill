@@ -1,0 +1,4 @@
+interface:
+  display_name: "日报自动化"
+  short_description: "AI-driven daily report automation for Feishu"
+  default_prompt: "帮我写今天的日报"
