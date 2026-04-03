@@ -9,28 +9,52 @@ git clone https://github.com/LawrenceChiu95/daily-report-skill ~/.agents/skills/
 bash ~/.agents/skills/daily-report/scripts/setup.sh
 ```
 
-setup 会自动完成：飞书 CLI 安装、认证、日报文件夹配置、权限列表、Agent 兼容配置。
+setup 提供两种模式：
+- **快速模式**（默认）：全部用默认值，10 秒装完，立刻可用
+- **完整模式**：逐项配置，解锁团队摘要、IM 私聊采集、定时触发等
+
+所有配置项之后都可以随时编辑 `~/.config/daily-report/config` 修改。
 
 ## 功能
 
 | 说什么 | 做什么 |
 |--------|--------|
 | 「写日报」 | 自动采集飞书日历、会议纪要、IM、AI 对话记录、文件变更，生成飞书日报 |
-| 「看看大家今天做了什么」 | 读取团队所有人的日报，提取跟你相关的内容 |
+| 「看看大家今天做了什么」 | 读取团队所有人的日报，提取跟你相关的内容（需在完整模式中配置） |
 
 ## 数据采集范围
 
-- 飞书日历和视频会议纪要
-- 飞书 IM 消息（群聊默认，私聊可选）
-- AI 对话记录（Cursor / Codex / Claude Code）
-- 工作区文件变更
+| 数据源 | 说明 | 是否需要额外配置 |
+|--------|------|:---:|
+| 飞书日历 | 今天参加了什么会 | 否 |
+| 飞书视频会议纪要 | 会议结论和纪要链接 | 否 |
+| 飞书 IM | 群聊消息（默认），私聊可选 | 私聊需在完整模式开启 |
+| AI 对话记录 | Cursor / Codex / Claude Code / Naomi | 否 |
+| 工作区文件变更 | 当天改了哪些 .md 文件 | 需配置 WORKSPACE_DIR |
 
 ## 支持的 AI Agent
 
-Cursor、Codex、Claude Code、OpenClaw/Naomi — setup 自动检测已安装的 Agent 并配置。
+| Agent | 兼容方式 |
+|-------|---------|
+| Cursor | 自动发现（通过 `~/.agents/skills/`） |
+| Codex | 自动发现（通过 `~/.agents/skills/`） |
+| Claude Code | setup 自动创建 symlink |
+| OpenClaw / Naomi | setup 自动生成指令文件 |
+
+setup 自动检测已安装的 Agent，只配置存在的，跳过不存在的。
 
 ## 配置文件
 
-`~/.config/daily-report/config`，由 setup 生成，可手动编辑。
+`~/.config/daily-report/config`，由 setup 生成。所有配置项都有注释说明，留空即跳过对应功能。
 
-详细使用指南见 `references/quickstart.md`。
+## 更新
+
+```bash
+cd ~/.agents/skills/daily-report && git pull
+```
+
+## 详细指南
+
+```bash
+cat ~/.agents/skills/daily-report/references/quickstart.md
+```
