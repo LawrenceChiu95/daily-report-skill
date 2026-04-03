@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Extract conversation topics from all AI agents for a given date.
 
-Scans Cursor, Codex, Claude Code transcripts and Naomi memory.
+Scans Cursor, Codex, Claude Code transcripts and OpenClaw memory.
 Each agent's collector is independent — missing agents are silently skipped.
 Optionally filter to a specific workspace via WORKSPACE_DIR env var.
 """

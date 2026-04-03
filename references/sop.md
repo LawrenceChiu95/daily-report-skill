@@ -47,11 +47,11 @@ bash ~/.agents/skills/daily-report/scripts/daily-report.sh collect 2026-04-01 # 
 
 限制：auto 模式只生成公开版骨架（会议 + 进展 + 待办），没有 AI 内容理解。适合快速打底稿。
 
-### C. Naomi/OpenClaw
+### C. OpenClaw
 
-对 Naomi 说「写日报」。Naomi 按 memory 中的指令执行类似流程。
+对 OpenClaw 说「写日报」。OpenClaw 按 memory 中的指令执行类似流程。
 
-限制：Naomi 只能读飞书数据和自己的记忆，无法读 Cursor/Codex/Claude Code 的对话记录。
+限制：云端部署的 OpenClaw 只能读飞书数据和自己的记忆，无法读本机的 Cursor/Codex/Claude Code 对话记录。本地部署不受此限制。
 
 ---
 

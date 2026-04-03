@@ -29,7 +29,7 @@ setup 提供两种模式：
 | 飞书日历 | 今天参加了什么会 | 否 |
 | 飞书视频会议纪要 | 会议结论和纪要链接 | 否 |
 | 飞书 IM | 群聊消息（默认），私聊可选 | 私聊需在完整模式开启 |
-| AI 对话记录 | Cursor / Codex / Claude Code / Naomi | 否 |
+| AI 对话记录 | Cursor / Codex / Claude Code / OpenClaw | 否 |
 | 工作区文件变更 | 当天改了哪些 .md 文件 | 需配置 WORKSPACE_DIR |
 
 ## 支持的 AI Agent
@@ -39,7 +39,7 @@ setup 提供两种模式：
 | Cursor | 自动发现（通过 `~/.agents/skills/`） |
 | Codex | 自动发现（通过 `~/.agents/skills/`） |
 | Claude Code | setup 自动创建 symlink |
-| OpenClaw / Naomi | setup 自动生成指令文件 |
+| OpenClaw | setup 自动生成指令文件 |
 
 setup 自动检测已安装的 Agent，只配置存在的，跳过不存在的。
 

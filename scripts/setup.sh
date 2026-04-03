@@ -282,7 +282,7 @@ if [[ -d "$HOME/.openclaw" ]]; then
 - 如果今天没有会议或任务，对应章节写「无」即可
 - 草稿阶段允许用户多次修改，最终确认后再创建文档
 NAOMI_EOF
-    echo "✓ Naomi/OpenClaw: 已生成指令文件 → ~/.openclaw/workspace/memory/daily-report-instructions.md"
+    echo "✓ OpenClaw: 已生成指令文件 → ~/.openclaw/workspace/memory/daily-report-instructions.md"
     ((agent_count++)) || true
 fi
 
