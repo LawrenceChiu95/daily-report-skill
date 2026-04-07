@@ -11,6 +11,58 @@ WEEKDAY="${WEEKDAY_NAMES[$WEEKDAY_NUM]}"
 
 SENSITIVE_PATTERN='团队升级|汰换|淘汰|裁员|开掉|替换优先级|候选名单|人员配置分析|人事调整|组织调整|汇报线|晋升|降级|绩效|适配度判断|HC|编制|预算分配|薪资|调薪|年终奖|股权|面试评价|offer审批|能力不足|不胜任|PIP|试用期不通过|保密|未公开|不要外传'
 
+# ── 非工作日草稿存储 ────────────────────────────────────────
+PENDING_DIR="$HOME/.daily-report/pending"
+mkdir -p "$PENDING_DIR"
+
+is_workday() {
+    local date="${1:-$TODAY}"
+
+    # 优先级 1：调休上班日（周末但上班）→ 工作日
+    if [[ " ${WORKDAY_OVERRIDES:-} " == *" $date "* ]]; then
+        return 0
+    fi
+
+    # 优先级 2：法定假日 → 非工作日
+    if [[ " ${HOLIDAYS:-} " == *" $date "* ]]; then
+        return 1
+    fi
+
+    # 优先级 3：无本地配置时 fallback 到 API
+    local dow
+    if [[ "$(uname)" == "Darwin" ]]; then
+        dow=$(date -j -f "%Y-%m-%d" "$date" "+%u" 2>/dev/null || echo "?")
+    else
+        dow=$(date -d "$date" "+%u" 2>/dev/null || echo "?")
+    fi
+    if [[ -z "${HOLIDAYS:-}" ]]; then
+        local api_result
+        api_result=$(curl -sf --max-time 3 "https://timor.tech/api/holiday/info/$date" 2>/dev/null) || true
+        if [[ -n "$api_result" ]]; then
+            local holiday_type
+            holiday_type=$(echo "$api_result" | jq -r '.type.type // empty' 2>/dev/null)
+            case "$holiday_type" in
+                0|3) return 0 ;;  # 0=工作日, 3=调休上班
+                1|2) return 1 ;;  # 1=周末, 2=法定假日
+            esac
+        fi
+    fi
+
+    # 兜底：按星期判断
+    [[ "$dow" -le 5 ]]
+}
+
+has_meaningful_output() {
+    local data="$1"
+    local conv_count git_count meeting_count gl_commits gl_mrs
+    conv_count=$(echo "$data" | jq '.conversations.total_sessions // 0')
+    git_count=$(echo "$data" | jq '.workspace.file_count // 0')
+    meeting_count=$(echo "$data" | jq '.meetings.count // 0')
+    gl_commits=$(echo "$data" | jq '.gitlab.commit_count // 0')
+    gl_mrs=$(echo "$data" | jq '.gitlab.mr_count // 0')
+    [[ "$conv_count" -gt 0 || "$git_count" -gt 0 || "$meeting_count" -gt 0 || "$gl_commits" -gt 0 || "$gl_mrs" -gt 0 ]]
+}
+
 is_sensitive_text() {
     local text="$1"
     if [[ -z "$text" ]]; then
@@ -147,6 +199,17 @@ collect_conversations() {
         || echo '{"conversations":[],"naomi_memory":null,"total_sessions":0}'
 }
 
+collect_gitlab() {
+    local target_date="${1:-$TODAY}"
+    if [[ -z "${GITLAB_HOST:-}" || -z "${GITLAB_TOKEN:-}" ]]; then
+        echo '{"commits":[],"mrs_authored":[],"mrs_reviewed":[],"commit_count":0,"mr_count":0,"review_count":0,"error":"未配置"}'
+        return
+    fi
+    GITLAB_HOST="$GITLAB_HOST" GITLAB_TOKEN="$GITLAB_TOKEN" \
+        python3 "$SCRIPT_DIR/collect-gitlab.py" "$target_date" 2>/dev/null \
+        || echo '{"commits":[],"mrs_authored":[],"mrs_reviewed":[],"commit_count":0,"mr_count":0,"review_count":0,"error":"脚本执行失败"}'
+}
+
 collect_meetings() {
     local target_date="${1:-$TODAY}"
     local start="${target_date}T00:00:00+08:00"
@@ -191,12 +254,34 @@ cmd_collect() {
         target_weekday="${WEEKDAY_NAMES[$target_weekday]:-?}"
     fi
 
-    local calendar git_data conversations meetings im_messages
+    local calendar git_data conversations meetings im_messages gitlab_data
     calendar=$(collect_calendar "$target_date")
     git_data=$(collect_git "$target_date")
     conversations=$(collect_conversations "$target_date")
     meetings=$(collect_meetings "$target_date")
     im_messages=$(collect_im "$target_date")
+    gitlab_data=$(collect_gitlab "$target_date")
+
+    # 检查是否有未消费的非工作日草稿
+    local pending_days="[]"
+    if [[ -d "$PENDING_DIR" ]]; then
+        for pf in "$PENDING_DIR"/*.json; do
+            [[ -f "$pf" ]] || continue
+            local pdate pweekday pdow
+            pdate=$(basename "$pf" .json)
+            if [[ "$(uname)" == "Darwin" ]]; then
+                pdow=$(date -j -f "%Y-%m-%d" "$pdate" "+%u" 2>/dev/null || echo "?")
+            else
+                pdow=$(date -d "$pdate" "+%u" 2>/dev/null || echo "?")
+            fi
+            pweekday="${WEEKDAY_NAMES[$pdow]:-}"
+            pending_days=$(echo "$pending_days" | jq \
+                --arg d "$pdate" \
+                --arg w "$pweekday" \
+                --slurpfile data "$pf" \
+                '. + [{"date": $d, "weekday": $w, "data": $data[0]}]')
+        done
+    fi
 
     jq -n \
         --arg date "$target_date" \
@@ -206,6 +291,8 @@ cmd_collect() {
         --argjson conversations "$conversations" \
         --argjson meetings "$meetings" \
         --argjson im "$im_messages" \
+        --argjson gitlab "$gitlab_data" \
+        --argjson pending_days "$pending_days" \
         '{
             date: $date,
             weekday: $weekday,
@@ -213,7 +300,9 @@ cmd_collect() {
             workspace: $workspace,
             conversations: $conversations,
             meetings: $meetings,
-            im: { messages: $im, count: ($im | length) }
+            im: { messages: $im, count: ($im | length) },
+            gitlab: $gitlab,
+            pending_days: $pending_days
         }'
 }
 
@@ -247,9 +336,141 @@ generate_markdown() {
 "
     fi
 
+    # ── 假期/周末推进（如有 pending_days）────────────────────────
+    local pending_section=""
+    local pending_count
+    pending_count=$(echo "$data" | jq '.pending_days | length // 0')
+    if [[ "$pending_count" -gt 0 ]]; then
+        local first_date last_date
+        first_date=$(echo "$data" | jq -r '.pending_days[0].date' | sed 's/^[0-9]*-//' | sed 's/-/\//')
+        last_date=$(echo "$data" | jq -r '.pending_days[-1].date' | sed 's/^[0-9]*-//' | sed 's/-/\//')
+        pending_section="### 假期/周末推进（${first_date}-${last_date}）
+
+"
+        while IFS= read -r day_entry; do
+            local pdate pweekday
+            pdate=$(echo "$day_entry" | jq -r '.date')
+            pweekday=$(echo "$day_entry" | jq -r '.weekday')
+            local p_display
+            p_display=$(echo "$pdate" | sed 's/^[0-9]*-//' | sed 's/^0//;s/-0/-/;s/-/月/')
+            pending_section+="**${p_display}日（${pweekday}）**
+"
+            # GitLab 提交
+            local p_gl_commits
+            p_gl_commits=$(echo "$day_entry" | jq '.data.gitlab.commit_count // 0')
+            if [[ "$p_gl_commits" -gt 0 ]]; then
+                while IFS= read -r commit; do
+                    local prj ttl
+                    prj=$(echo "$commit" | jq -r '.project // ""')
+                    ttl=$(echo "$commit" | jq -r '.commit_title // ""')
+                    pending_section+="- 代码提交：${ttl}（${prj}）
+"
+                done < <(echo "$day_entry" | jq -c '.data.gitlab.commits[]? // empty')
+            fi
+            # MR 动态
+            local p_gl_mrs
+            p_gl_mrs=$(echo "$day_entry" | jq '.data.gitlab.mr_count // 0')
+            if [[ "$p_gl_mrs" -gt 0 ]]; then
+                while IFS= read -r mr; do
+                    local ttl prj
+                    ttl=$(echo "$mr" | jq -r '.title // ""')
+                    prj=$(echo "$mr" | jq -r '.project // ""')
+                    pending_section+="- MR：${ttl}（${prj}）
+"
+                done < <(echo "$day_entry" | jq -c '.data.gitlab.mrs_authored[]? // empty')
+            fi
+            # 工作区文档变更
+            local p_dir_count
+            p_dir_count=$(echo "$day_entry" | jq '.data.workspace.directories | length // 0')
+            if [[ "$p_dir_count" -gt 0 ]]; then
+                while IFS= read -r dir_entry; do
+                    local dirname files_preview
+                    dirname=$(echo "$dir_entry" | jq -r '.directory')
+                    files_preview=$(echo "$dir_entry" | jq -r '.files[:3] | join("、")')
+                    local line="- 文档变更：**${dirname}** — ${files_preview}"
+                    if ! is_sensitive_text "$line"; then
+                        pending_section+="${line}
+"
+                    fi
+                done < <(echo "$day_entry" | jq -c '.data.workspace.directories[]? // empty')
+            fi
+            # 如果什么都没有，标记对话活跃
+            local p_conv
+            p_conv=$(echo "$day_entry" | jq '.data.conversations.total_sessions // 0')
+            if [[ "$p_gl_commits" -eq 0 && "$p_gl_mrs" -eq 0 && "$p_dir_count" -eq 0 && "$p_conv" -gt 0 ]]; then
+                pending_section+="- AI 对话 ${p_conv} 个会话（详见对话记录）
+"
+            fi
+            pending_section+="
+"
+        done < <(echo "$data" | jq -c '.pending_days[]')
+    fi
+
     local progress_section="### 今日进展
 
 "
+
+    # ── GitLab 代码提交 & MR ────────────────────────────────────────
+    local gl_commit_count gl_mr_count gl_review_count gl_error
+    gl_commit_count=$(echo "$data" | jq '.gitlab.commit_count // 0')
+    gl_mr_count=$(echo "$data" | jq '.gitlab.mr_count // 0')
+    gl_review_count=$(echo "$data" | jq '.gitlab.review_count // 0')
+    gl_error=$(echo "$data" | jq -r '.gitlab.error // ""')
+
+    if [[ "$gl_error" == "null" || -z "$gl_error" ]]; then
+        if [[ "$gl_commit_count" -gt 0 ]]; then
+            progress_section+="**代码提交（${gl_commit_count} commits）**\n\n"
+            while IFS= read -r commit; do
+                [[ -z "$commit" || "$commit" == "null" ]] && continue
+                local prj ref cnt ttl
+                prj=$(echo "$commit" | jq -r '.project // ""')
+                ref=$(echo "$commit" | jq -r '.ref // ""')
+                cnt=$(echo "$commit" | jq -r '.commit_count // 1')
+                ttl=$(echo "$commit" | jq -r '.commit_title // ""')
+                progress_section+="- **${prj}** \`${ref}\`：${cnt} 次 — ${ttl}\n"
+            done < <(echo "$data" | jq -c '.gitlab.commits[]? // empty')
+            progress_section+="\n"
+        fi
+
+        if [[ "$gl_mr_count" -gt 0 ]]; then
+            progress_section+="**MR 动态**\n\n"
+            while IFS= read -r mr; do
+                [[ -z "$mr" || "$mr" == "null" ]] && continue
+                local action ttl prj action_label
+                action=$(echo "$mr" | jq -r '.action // ""')
+                ttl=$(echo "$mr" | jq -r '.title // ""')
+                prj=$(echo "$mr" | jq -r '.project // ""')
+                case "$action" in
+                    opened|created) action_label="创建" ;;
+                    merged|accepted) action_label="合并" ;;
+                    closed) action_label="关闭" ;;
+                    *) action_label="$action" ;;
+                esac
+                progress_section+="- ${action_label} MR：${ttl}（${prj}）\n"
+            done < <(echo "$data" | jq -c '.gitlab.mrs_authored[]? // empty')
+            progress_section+="\n"
+        fi
+
+        if [[ "$gl_review_count" -gt 0 ]]; then
+            progress_section+="**Code Review**\n\n"
+            while IFS= read -r mr; do
+                [[ -z "$mr" || "$mr" == "null" ]] && continue
+                local action ttl prj action_label
+                action=$(echo "$mr" | jq -r '.action // ""')
+                ttl=$(echo "$mr" | jq -r '.title // ""')
+                prj=$(echo "$mr" | jq -r '.project // ""')
+                case "$action" in
+                    "commented on") action_label="评论" ;;
+                    approved) action_label="Approved" ;;
+                    *) action_label="$action" ;;
+                esac
+                progress_section+="- ${action_label}：${ttl}（${prj}）\n"
+            done < <(echo "$data" | jq -c '.gitlab.mrs_reviewed[]? // empty')
+            progress_section+="\n"
+        fi
+    fi
+
+    # ── 工作区文档变更 ──────────────────────────────────────────────
     local dir_count
     dir_count=$(echo "$data" | jq '.workspace.directories | length')
     if [[ "$dir_count" -gt 0 ]]; then
@@ -263,9 +484,8 @@ generate_markdown() {
             fi
         done < <(echo "$data" | jq -c '.workspace.directories[]')
     fi
-    if [[ "$progress_section" == $'### 今日进展
 
-' ]]; then
+    if [[ "$gl_commit_count" -eq 0 && "$gl_mr_count" -eq 0 && "$gl_review_count" -eq 0 && "$dir_count" -eq 0 ]]; then
         progress_section+="- （待补充）\n"
     fi
 
@@ -276,6 +496,9 @@ generate_markdown() {
 
     local markdown=""
     markdown+="${meetings_section}\n"
+    if [[ -n "$pending_section" ]]; then
+        markdown+="${pending_section}\n"
+    fi
     markdown+="${progress_section}\n"
     markdown+="${next_section}\n"
 
@@ -358,22 +581,54 @@ cmd_create() {
 
 cmd_auto() {
     local draft_flag=""
-    if [[ "${1:-}" == "--draft" ]]; then
-        draft_flag="--draft"
+    local target_date="$TODAY"
+    for arg in "$@"; do
+        case "$arg" in
+            --draft) draft_flag="--draft" ;;
+            20[0-9][0-9]-*) target_date="$arg" ;;
+        esac
+    done
+
+    # 非工作日：静默存档到本地，不创建飞书文档
+    if ! is_workday "$target_date"; then
+        local data
+        data=$(cmd_collect "$target_date")
+        if has_meaningful_output "$data"; then
+            echo "$data" > "$PENDING_DIR/${target_date}.json"
+            echo "非工作日（${target_date}），已静默存档到 $PENDING_DIR/${target_date}.json" >&2
+        else
+            echo "非工作日（${target_date}），无工作产出，跳过" >&2
+        fi
+        return 0
     fi
 
+    # 工作日：正常流程
     local data
-    data=$(cmd_collect)
+    data=$(cmd_collect "$target_date")
     local markdown
     markdown=$(generate_markdown "$data")
 
-    local title="${TODAY} ${WEEKDAY} 日报"
+    local weekday_label="$WEEKDAY"
+    if [[ "$target_date" != "$TODAY" ]]; then
+        local dow
+        if [[ "$(uname)" == "Darwin" ]]; then
+            dow=$(date -j -f "%Y-%m-%d" "$target_date" "+%u" 2>/dev/null || echo "?")
+        else
+            dow=$(date -d "$target_date" "+%u" 2>/dev/null || echo "?")
+        fi
+        weekday_label="${WEEKDAY_NAMES[$dow]:-}"
+    fi
+
+    local title="${target_date} ${weekday_label} 日报"
     local create_args=(--title "$title")
     if [[ -n "$draft_flag" ]]; then
         create_args+=(--draft)
     fi
 
     echo "$markdown" | cmd_create "${create_args[@]}"
+
+    # 创建成功后清除已消费的 pending 草稿
+    cmd_clear_pending
 }
 
 cmd_publish() {
@@ -405,6 +660,18 @@ cmd_publish() {
         echo "发布失败：" >&2
         echo "$result" >&2
         exit 1
+    fi
+}
+
+cmd_clear_pending() {
+    local count=0
+    for pf in "$PENDING_DIR"/*.json; do
+        [[ -f "$pf" ]] || continue
+        rm "$pf"
+        count=$((count + 1))
+    done
+    if [[ "$count" -gt 0 ]]; then
+        echo "已清除 ${count} 个非工作日草稿" >&2
     fi
 }
 
@@ -514,14 +781,16 @@ usage() {
 命令：
   collect [日期]       收集会议、待办、对话、工作区变更，输出 JSON
   create [--title T]   从 stdin 读取 markdown，创建到个人空间（草稿）
-  auto [--draft]       自动收集 + 生成 + 创建到个人空间（带基础敏感过滤）
+  auto [--draft] [日期] 自动收集 + 生成 + 创建（非工作日自动存本地草稿）
   publish <wiki_token> 将草稿从个人空间移到公共目录 + 授权
   digest [日期]        读取团队所有人的日报，输出 JSON 供 AI 生成摘要
+  clear-pending        清除已消费的非工作日草稿
 
 示例：
   bash $0 collect                              # 查看今日数据
-  bash $0 auto                                 # 一键生成日报
+  bash $0 auto                                 # 一键生成日报（非工作日自动存草稿）
   bash $0 auto --draft                         # 生成草稿日报
+  bash $0 auto 2026-04-05                      # 补生成指定日期日报
   echo "## 自定义内容" | bash $0 create         # 从自定义内容创建
 
 配置：$CONF_FILE
@@ -530,12 +799,13 @@ EOF
 
 main() {
     case "${1:-help}" in
-        collect)  shift; cmd_collect "$@" ;;
-        create)   shift; cmd_create "$@" ;;
-        publish)  shift; cmd_publish "$@" ;;
-        auto)     shift; cmd_auto "$@" ;;
-        digest)   shift; cmd_digest "$@" ;;
-        credits)  cmd_credits ;;
+        collect)       shift; cmd_collect "$@" ;;
+        create)        shift; cmd_create "$@" ;;
+        publish)       shift; cmd_publish "$@" ;;
+        auto)          shift; cmd_auto "$@" ;;
+        digest)        shift; cmd_digest "$@" ;;
+        clear-pending) shift; cmd_clear_pending "$@" ;;
+        credits)       cmd_credits ;;
         help|-h|--help) usage ;;
         *) echo "未知命令: $1" >&2; usage; exit 1 ;;
     esac

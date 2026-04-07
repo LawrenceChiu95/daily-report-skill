@@ -53,6 +53,10 @@ workspace_dir=""
 report_folder=""
 permission_list=""
 im_include_p2p="false"
+gitlab_host=""
+gitlab_token=""
+holidays=""
+workday_overrides=""
 team_wiki_node=""
 team_space_id=""
 watch_list=""
@@ -62,13 +66,13 @@ install_cron="n"
 if [[ "$setup_mode" == "2" ]]; then
 
 echo ""
-echo "--- 1/6 工作区路径（可选）---"
+echo "--- 1/8 工作区路径（可选）---"
 echo "用于提取工作区文件变更记录。"
 read -rp "工作区路径 [留空跳过]: " workspace_input
 workspace_dir="${workspace_input:-}"
 
 echo ""
-echo "--- 2/6 日报存放位置（可选）---"
+echo "--- 2/8 日报存放位置（可选）---"
 echo "日报默认创建在飞书个人空间根目录。"
 echo "如需指定文件夹，输入飞书文件夹 URL 或 token。"
 read -rp "文件夹 [留空用默认位置]: " folder_input
@@ -83,14 +87,14 @@ if [[ -n "$folder_input" ]]; then
 fi
 
 echo ""
-echo "--- 3/6 权限自动授予（可选）---"
+echo "--- 3/8 权限自动授予（可选）---"
 echo "日报创建后自动给谁授予阅读权限？"
 echo "提示：lark-cli contact +search \"姓名\" 可查 open_id"
 read -rp "open_id 列表，空格分隔 [留空跳过]: " permission_input
 permission_list="${permission_input:-}"
 
 echo ""
-echo "--- 4/6 IM 采集范围（可选）---"
+echo "--- 4/8 IM 采集范围（可选）---"
 echo "日报数据采集默认只读群聊消息。"
 read -rp "是否也采集私聊消息？[y/N]: " im_p2p_input
 im_include_p2p="false"
@@ -99,7 +103,34 @@ if [[ "${im_p2p_input:-n}" =~ ^[Yy] ]]; then
 fi
 
 echo ""
-echo "--- 5/6 团队日报摘要（可选）---"
+echo "--- 5/8 GitLab 代码采集（可选）---"
+echo "配置后日报自动包含当天的 commit 和 MR 动态。"
+echo "需要 GitLab Personal Access Token（api scope）。"
+read -rp "GitLab 地址（如 https://git.example.com）[留空跳过]: " gitlab_host_input
+gitlab_host="${gitlab_host_input:-}"
+gitlab_token=""
+if [[ -n "$gitlab_host" ]]; then
+    read -rp "GitLab Token: " gitlab_token_input
+    gitlab_token="${gitlab_token_input:-}"
+    if [[ -n "$gitlab_token" ]]; then
+        echo "✓ GitLab 已配置"
+    else
+        echo "⚠ Token 为空，GitLab 采集不会生效"
+        gitlab_host=""
+    fi
+fi
+
+echo ""
+echo "--- 6/8 节假日配置（可选）---"
+echo "配置后非工作日自动存本地草稿，工作日合并输出。"
+echo "留空则使用公共 API（timor.tech）自动判断，或按星期兜底。"
+read -rp "法定假日列表（空格分隔，如 2026-05-01 2026-05-02）[留空用 API]: " holidays_input
+holidays="${holidays_input:-}"
+read -rp "调休上班日（空格分隔，如 2026-04-26）[留空跳过]: " workday_overrides_input
+workday_overrides="${workday_overrides_input:-}"
+
+echo ""
+echo "--- 7/8 团队日报摘要（可选）---"
 echo "配置后可以说「看看大家今天做了什么」，自动读取团队日报并提取跟你相关的内容。"
 echo "粘贴团队日报的飞书知识库链接，格式如 https://xxx.feishu.cn/wiki/xxxxx"
 read -rp "链接或 token [留空跳过]: " team_input
@@ -138,7 +169,7 @@ if [[ -n "$team_input" ]]; then
 fi
 
 echo ""
-echo "--- 6/6 定时触发（可选）---"
+echo "--- 8/8 定时触发（可选）---"
 if [[ "$(uname)" == "Darwin" ]]; then
     read -rp "是否安装每日 18:00 自动生成草稿日报？[y/N]: " install_cron
 fi
@@ -168,6 +199,16 @@ PERMISSION_LIST="$permission_list"
 
 # IM 采集范围：true = 群聊+私聊，false = 仅群聊
 IM_INCLUDE_P2P="$im_include_p2p"
+
+# GitLab 代码采集（留空则跳过，日报不包含 commit/MR）
+GITLAB_HOST="$gitlab_host"
+GITLAB_TOKEN="$gitlab_token"
+
+# 节假日配置（留空则用 timor.tech API 自动判断，API 不通则按星期兜底）
+# 法定假日（空格分隔的 YYYY-MM-DD 列表）
+HOLIDAYS="$holidays"
+# 调休上班日（空格分隔的 YYYY-MM-DD 列表）
+WORKDAY_OVERRIDES="$workday_overrides"
 
 # 团队日报摘要（留空则不启用 digest 功能）
 TEAM_WIKI_NODE="$team_wiki_node"
