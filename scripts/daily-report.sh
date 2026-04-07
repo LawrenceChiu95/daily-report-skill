@@ -688,57 +688,102 @@ cmd_digest() {
 
     local date_no_pad
     date_no_pad=$(echo "$target_date" | sed 's/-0/-/g; s/^0//')
-    local date_patterns=("$target_date" "$date_no_pad")
+    # 中文日期格式（补零版 + 不补零版）
+    local y m d
+    IFS='-' read -r y m d <<< "$target_date"
+    local date_cn_padded="${y}年${m}月${d}日"
+    local m_np=${m#0} d_np=${d#0}
+    local date_cn_unpadded="${y}年${m_np}月${d_np}日"
+    local date_patterns=("$target_date" "$date_no_pad" "$date_cn_padded" "$date_cn_unpadded")
 
     local people_nodes
     people_nodes=$(lark-cli api GET "/open-apis/wiki/v2/spaces/$TEAM_SPACE_ID/nodes" \
         --params "{\"parent_node_token\":\"$TEAM_WIKI_NODE\"}" --page-all 2>/dev/null \
-        | jq -c '[.data.items[]? | {name: .title, node_token: .node_token, has_child: .has_child}]' 2>/dev/null) || people_nodes='[]'
+        | jq -c '[.data.items[]? | {name: .title, node_token: .node_token, obj_token: .obj_token, has_child: .has_child}]' 2>/dev/null) || people_nodes='[]'
 
     local reports='[]'
     while IFS= read -r person; do
-        local name node_token has_child
+        local name node_token obj_token_root has_child
         name=$(echo "$person" | jq -r '.name')
         node_token=$(echo "$person" | jq -r '.node_token')
+        obj_token_root=$(echo "$person" | jq -r '.obj_token // empty')
         has_child=$(echo "$person" | jq -r '.has_child')
 
         if [[ "$name" == "${USER_NAME:-}" ]]; then
             continue
         fi
 
-        if [[ "$has_child" != "true" ]]; then
-            continue
-        fi
-
-        local children
-        children=$(lark-cli api GET "/open-apis/wiki/v2/spaces/$TEAM_SPACE_ID/nodes" \
-            --params "{\"parent_node_token\":\"$node_token\"}" --page-all 2>/dev/null \
-            | jq -c '.data.items // []' 2>/dev/null) || children='[]'
-
         local matched_doc=""
-        for pat in "${date_patterns[@]}"; do
-            matched_doc=$(echo "$children" | jq -c --arg d "$pat" '[.[]? | select(.title | contains($d))] | first // empty' 2>/dev/null)
-            if [[ -n "$matched_doc" ]]; then
-                break
-            fi
-        done
+        local obj_token="" doc_title="" node_token_doc="" url=""
 
-        if [[ -z "$matched_doc" ]]; then
-            continue
+        # 策略1：子节点匹配（标题含日期）
+        if [[ "$has_child" == "true" ]]; then
+            local children
+            children=$(lark-cli api GET "/open-apis/wiki/v2/spaces/$TEAM_SPACE_ID/nodes" \
+                --params "{\"parent_node_token\":\"$node_token\"}" --page-all 2>/dev/null \
+                | jq -c '.data.items // []' 2>/dev/null) || children='[]'
+
+            for pat in "${date_patterns[@]}"; do
+                matched_doc=$(echo "$children" | jq -c --arg d "$pat" '[.[]? | select(.title | contains($d))] | first // empty' 2>/dev/null)
+                if [[ -n "$matched_doc" ]]; then
+                    break
+                fi
+            done
+
+            if [[ -n "$matched_doc" ]]; then
+                obj_token=$(echo "$matched_doc" | jq -r '.obj_token')
+                doc_title=$(echo "$matched_doc" | jq -r '.title')
+                node_token_doc=$(echo "$matched_doc" | jq -r '.node_token // empty')
+            fi
         fi
 
-        local obj_token doc_title
-        obj_token=$(echo "$matched_doc" | jq -r '.obj_token')
-        doc_title=$(echo "$matched_doc" | jq -r '.title')
+        # 策略2：根文档中解析链接/mention-doc（has_child=false 或策略1未命中）
+        if [[ -z "$obj_token" && -n "$obj_token_root" ]]; then
+            local root_md
+            root_md=$(lark-cli docs +fetch --doc "$obj_token_root" 2>/dev/null \
+                | jq -r '.data.markdown // ""' 2>/dev/null) || root_md=""
+
+            if [[ -n "$root_md" ]]; then
+                local linked_token=""
+                for pat in "${date_patterns[@]}"; do
+                    # 2a: Markdown 链接 [日报标题](https://.../wiki/TOKEN)，兼容 URL 编码 %2F
+                    linked_token=$(echo "$root_md" | grep -F "$pat" | \
+                        grep -oE 'feishu\.cn(/|%2F)wiki(/|%2F)[A-Za-z0-9]+' | head -1 | sed -E 's|.*wiki/||; s|.*wiki%2F||' || true)
+                    if [[ -n "$linked_token" ]]; then
+                        break
+                    fi
+                    # 2b: mention-doc 格式 <mention-doc token="TOKEN">...日期...</mention-doc>
+                    linked_token=$(echo "$root_md" | grep -F "$pat" | \
+                        grep -oE 'mention-doc token="[A-Za-z0-9]+"' | head -1 | sed 's/mention-doc token="//;s/"//') || true
+                    if [[ -n "$linked_token" ]]; then
+                        break
+                    fi
+                done
+
+                if [[ -n "$linked_token" ]]; then
+                    obj_token="$linked_token"
+                    doc_title="$name $target_date"
+                    node_token_doc=""
+                    url="https://xd.feishu.cn/wiki/${linked_token}"
+                fi
+            fi
+        fi
+
+        # 未找到日报
+        if [[ -z "$obj_token" ]]; then
+            continue
+        fi
 
         local content=""
-        if [[ -n "$obj_token" ]]; then
-            content=$(lark-cli docs +fetch --doc "$obj_token" 2>/dev/null \
-                | jq -r '.data.markdown // ""' 2>/dev/null) || content=""
+        content=$(lark-cli docs +fetch --doc "$obj_token" 2>/dev/null \
+            | jq -r '.data.markdown // ""' 2>/dev/null) || content=""
+
+        if [[ -z "$url" && -n "$node_token_doc" ]]; then
+            url="https://xd.feishu.cn/wiki/${node_token_doc}"
         fi
 
-        reports=$(echo "$reports" | jq -c --arg name "$name" --arg title "$doc_title" --arg content "$content" \
-            '. + [{author: $name, title: $title, content: $content}]')
+        reports=$(echo "$reports" | jq -c --arg name "$name" --arg title "$doc_title" --arg content "$content" --arg url "$url" \
+            '. + [{author: $name, title: $title, content: $content, url: $url}]')
     done < <(echo "$people_nodes" | jq -c '.[]')
 
     local watch_list_json='[]'
