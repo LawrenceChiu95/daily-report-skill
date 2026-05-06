@@ -114,5 +114,5 @@ lark-cli contact +search "姓名"
 |------|------|---------|
 | auto 模式日报质量低 | shell 脚本不理解内容，只能列文件名 | 用 AI Agent 交互式模式 |
 | 文件变更可能不准 | 基于 stat 时间戳，多次修改只记最后一次日期 | AI 交叉验证对话记录 |
-| 飞书 IM 需额外授权 | `im:message:search` scope 需在 lark-cli 登录时单独申请 | 登录时加 `--domain im`，或手动补充重要对话要点 |
+| 飞书 IM 需额外授权 | 消息搜索需要 `search:message`；群聊读取需要 `im:message.group_msg:get_as_user`；私聊读取需要 `im:message.p2p_msg:get_as_user` | setup 会自动检查；手动修复可运行 `lark-cli auth login --scope "search:message im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user"` |
 | 云端/飞书 Bot 无法采集本地数据 | 云端 OpenClaw 或飞书 Bot 跑的是远端 shell，无法访问本机的 Agent 对话记录和文件变更 | 本地部署的 OpenClaw 不受此限制；云端/Bot 部署只能用飞书 API 采集，对话记录覆盖受限 |

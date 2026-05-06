@@ -36,6 +36,10 @@ setup 会自动检测已安装的 Agent 并配置兼容性。
 
 用户说「写日报」时，按以下步骤执行：
 
+### Step 0: 读日报规则
+
+先读本 Skill 附带的 `references/sop.md`。如果当前工作区另有明确的日报 SOP，可用工作区 SOP 覆盖通用规则。
+
 ### Step 1: 数据采集
 
 运行脚本收集当天元数据：
@@ -51,6 +55,8 @@ bash ~/.agents/skills/daily-report/scripts/daily-report.sh collect [日期]
 ### Step 2: IM 补充
 
 如果具备 IM 搜索权限，使用 `lark-cli im +messages-search` 补充飞书群聊中的关键信息。重点关注：口径变化、决策结论、Action Items。
+
+权限要求：消息搜索需要 `search:message`，群聊读取需要 `im:message.group_msg:get_as_user`；如果用户开启私聊采集，还需要 `im:message.p2p_msg:get_as_user`。
 
 ### Step 3: 读对话理解工作
 
@@ -129,9 +135,8 @@ bash ~/.agents/skills/daily-report/scripts/daily-report.sh publish <wiki_token>
 ## 飞书文档更新规则
 
 - **首次创建**：使用 `create` 命令
-- **用户未在飞书端修改过**：可用 `lark-cli docs +update --mode overwrite`
-- **用户已在飞书端修改过**：只用 `--mode append` 或 `--mode replace_range --selection-by-title "## 章节名"`
-- **不确定**：先问用户
+- **更新已有文档**：默认只用 `--mode append` 或 `--mode replace_range --selection-by-title "## 章节名"`
+- **覆盖整篇**：只有用户在当前对话里明确说“覆盖”时才使用 overwrite
 
 ## 日报原则
 

@@ -6,6 +6,29 @@ SCRIPT_DIR="$SKILL_DIR/scripts"
 CONF_DIR="$HOME/.config/daily-report"
 CONF_FILE="$CONF_DIR/config"
 REPORT_SCRIPT="$SCRIPT_DIR/daily-report.sh"
+LOGIN_DOMAINS="calendar,docs,drive,contact,vc,im"
+GROUP_MESSAGE_SCOPES="search:message im:message.group_msg:get_as_user"
+P2P_MESSAGE_SCOPE="im:message.p2p_msg:get_as_user"
+
+shell_quote() {
+    printf "%q" "$1"
+}
+
+ensure_scopes() {
+    local scopes="$1"
+    if [[ -z "$scopes" ]]; then
+        return 0
+    fi
+
+    local check_result
+    check_result=$(lark-cli auth check --scope "$scopes" 2>/dev/null) || true
+    local ok
+    ok=$(echo "$check_result" | jq -r '.ok // false' 2>/dev/null)
+    if [[ "$ok" != "true" ]]; then
+        echo "需要补充飞书授权 scope: $scopes"
+        lark-cli auth login --scope "$scopes"
+    fi
+}
 
 echo "=== 日报自动化 · 初始化 ==="
 echo ""
@@ -22,26 +45,35 @@ echo ""
 if ! command -v lark-cli &>/dev/null; then
     echo "lark-cli 未安装，尝试自动安装..."
     if command -v npm &>/dev/null; then
-        npm install -g lark-cli
+        npm install -g @larksuite/cli
         if ! command -v lark-cli &>/dev/null; then
-            echo "错误：安装失败，请手动运行: npm install -g lark-cli"
+            echo "错误：安装失败，请手动运行: npm install -g @larksuite/cli"
             exit 1
         fi
     else
         echo "错误：npm 未安装，无法自动安装 lark-cli"
-        echo "请先安装 Node.js（https://nodejs.org），然后运行: npm install -g lark-cli"
+        echo "请先安装 Node.js（https://nodejs.org），然后运行: npm install -g @larksuite/cli"
         exit 1
     fi
 fi
 echo "✓ lark-cli 已安装"
 
+for dep in jq python3 curl; do
+    if ! command -v "$dep" &>/dev/null; then
+        echo "错误：缺少依赖 $dep，请先安装后重试" >&2
+        exit 1
+    fi
+done
+echo "✓ jq / python3 / curl 已安装"
+
 auth_status=$(lark-cli auth status 2>&1) || true
 token_status=$(echo "$auth_status" | jq -r '.tokenStatus // "unknown"' 2>/dev/null)
-if [[ "$token_status" != "valid" ]]; then
+if [[ "$token_status" != "valid" && "$token_status" != "needs_refresh" ]]; then
     echo "需要飞书认证，正在发起授权..."
-    lark-cli auth login --domain calendar,task,doc,drive,contact
+    lark-cli auth login --domain "$LOGIN_DOMAINS"
     auth_status=$(lark-cli auth status 2>&1)
 fi
+ensure_scopes "$GROUP_MESSAGE_SCOPES"
 
 user_name=$(echo "$auth_status" | jq -r '.userName // ""')
 user_open_id=$(echo "$auth_status" | jq -r '.userOpenId // ""')
@@ -51,6 +83,7 @@ echo "✓ 已认证为: $user_name ($user_open_id)"
 
 workspace_dir=""
 report_folder=""
+feishu_base_url="https://www.feishu.cn"
 permission_list=""
 im_include_p2p="false"
 gitlab_host=""
@@ -87,6 +120,13 @@ if [[ -n "$folder_input" ]]; then
 fi
 
 echo ""
+echo "飞书租户域名（用于拼接会议纪要/知识库链接）。"
+echo "常见示例：https://www.feishu.cn、https://example.feishu.cn、https://example.larkoffice.com"
+read -rp "域名 [默认 https://www.feishu.cn]: " feishu_base_input
+feishu_base_url="${feishu_base_input:-https://www.feishu.cn}"
+feishu_base_url="${feishu_base_url%/}"
+
+echo ""
 echo "--- 3/8 权限自动授予（可选）---"
 echo "日报创建后自动给谁授予阅读权限？"
 echo "提示：lark-cli contact +search \"姓名\" 可查 open_id"
@@ -100,6 +140,7 @@ read -rp "是否也采集私聊消息？[y/N]: " im_p2p_input
 im_include_p2p="false"
 if [[ "${im_p2p_input:-n}" =~ ^[Yy] ]]; then
     im_include_p2p="true"
+    ensure_scopes "$P2P_MESSAGE_SCOPE"
 fi
 
 echo ""
@@ -110,7 +151,8 @@ read -rp "GitLab 地址（如 https://git.example.com）[留空跳过]: " gitlab
 gitlab_host="${gitlab_host_input:-}"
 gitlab_token=""
 if [[ -n "$gitlab_host" ]]; then
-    read -rp "GitLab Token: " gitlab_token_input
+    read -rsp "GitLab Token: " gitlab_token_input
+    echo ""
     gitlab_token="${gitlab_token_input:-}"
     if [[ -n "$gitlab_token" ]]; then
         echo "✓ GitLab 已配置"
@@ -163,7 +205,7 @@ if [[ -n "$team_input" ]]; then
     watch_list="${watch_input:-}"
     echo ""
     echo "用一句话描述你的工作职责（AI 用这个判断哪些日报跟你相关）"
-    echo "例：TapTap 社区负责人，管社区运营、评价、GameJam"
+    echo "例：产品运营负责人，负责用户社区、内容生态和活动项目"
     read -rp "职责描述 [留空跳过]: " role_input
     my_role="${role_input:-}"
 fi
@@ -178,6 +220,7 @@ fi  # end of setup_mode == "2"
 
 # --- 写入配置 ---
 
+umask 077
 mkdir -p "$CONF_DIR"
 cat > "$CONF_FILE" << CONFEOF
 # 日报自动化配置文件（由 setup 脚本生成于 $(date +%Y-%m-%d)）
@@ -185,41 +228,45 @@ cat > "$CONF_FILE" << CONFEOF
 # 修改后立即生效，无需重新运行 setup。
 
 # 飞书账号（自动填充）
-USER_OPEN_ID="$user_open_id"
-USER_NAME="$user_name"
+USER_OPEN_ID=$(shell_quote "$user_open_id")
+USER_NAME=$(shell_quote "$user_name")
 
 # 工作区路径（用于提取文件变更，留空则跳过）
-WORKSPACE_DIR="$workspace_dir"
+WORKSPACE_DIR=$(shell_quote "$workspace_dir")
 
 # 日报存放位置（留空则创建在个人空间根目录）
-REPORT_FOLDER="$report_folder"
+REPORT_FOLDER=$(shell_quote "$report_folder")
+
+# 飞书租户域名（用于拼接会议纪要/知识库链接）
+FEISHU_BASE_URL=$(shell_quote "$feishu_base_url")
 
 # 创建日报后自动授予 view 权限的 open_id 列表（空格分隔，留空则不授权）
-PERMISSION_LIST="$permission_list"
+PERMISSION_LIST=$(shell_quote "$permission_list")
 
 # IM 采集范围：true = 群聊+私聊，false = 仅群聊
-IM_INCLUDE_P2P="$im_include_p2p"
+IM_INCLUDE_P2P=$(shell_quote "$im_include_p2p")
 
 # GitLab 代码采集（留空则跳过，日报不包含 commit/MR）
-GITLAB_HOST="$gitlab_host"
-GITLAB_TOKEN="$gitlab_token"
+GITLAB_HOST=$(shell_quote "$gitlab_host")
+GITLAB_TOKEN=$(shell_quote "$gitlab_token")
 
 # 节假日配置（留空则用 timor.tech API 自动判断，API 不通则按星期兜底）
 # 法定假日（空格分隔的 YYYY-MM-DD 列表）
-HOLIDAYS="$holidays"
+HOLIDAYS=$(shell_quote "$holidays")
 # 调休上班日（空格分隔的 YYYY-MM-DD 列表）
-WORKDAY_OVERRIDES="$workday_overrides"
+WORKDAY_OVERRIDES=$(shell_quote "$workday_overrides")
 
 # 团队日报摘要（留空则不启用 digest 功能）
-TEAM_WIKI_NODE="$team_wiki_node"
-TEAM_SPACE_ID="$team_space_id"
+TEAM_WIKI_NODE=$(shell_quote "$team_wiki_node")
+TEAM_SPACE_ID=$(shell_quote "$team_space_id")
 
 # 重点关注的人（逗号分隔，留空则全部由 AI 判断）
-WATCH_LIST="$watch_list"
+WATCH_LIST=$(shell_quote "$watch_list")
 
 # 你的工作职责（一句话，AI 用来判断哪些日报跟你相关，留空也可以）
-MY_ROLE="$my_role"
+MY_ROLE=$(shell_quote "$my_role")
 CONFEOF
+chmod 600 "$CONF_FILE"
 
 echo ""
 echo "✓ 配置已写入: $CONF_FILE"
@@ -395,7 +442,7 @@ echo "详细使用指南：cat $SKILL_DIR/references/quickstart.md"
 cat << 'COFFEE'
 
   ┌──────────────────────────────────────┐
-  │  日报自动化 · Powered by 远夏        │
+  │  日报自动化 · Ready for sharing      │
   │                                      │
   │  本工具接受咖啡形式的 star ⭐          │
   └──────────────────────────────────────┘

@@ -11,6 +11,16 @@ WEEKDAY="${WEEKDAY_NAMES[$WEEKDAY_NUM]}"
 
 SENSITIVE_PATTERN='团队升级|汰换|淘汰|裁员|开掉|替换优先级|候选名单|人员配置分析|人事调整|组织调整|汇报线|晋升|降级|绩效|适配度判断|HC|编制|预算分配|薪资|调薪|年终奖|股权|面试评价|offer审批|能力不足|不胜任|PIP|试用期不通过|保密|未公开|不要外传'
 
+feishu_base_url() {
+    local base="${FEISHU_BASE_URL:-https://www.feishu.cn}"
+    echo "${base%/}"
+}
+
+feishu_url() {
+    local path="$1"
+    printf '%s/%s' "$(feishu_base_url)" "${path#/}"
+}
+
 # ── 非工作日草稿存储 ────────────────────────────────────────
 PENDING_DIR="$HOME/.daily-report/pending"
 mkdir -p "$PENDING_DIR"
@@ -91,7 +101,7 @@ check_auth() {
     local token_status
     token_status=$(echo "$status" | jq -r '.tokenStatus // "unknown"' 2>/dev/null)
     if [[ "$token_status" != "valid" && "$token_status" != "needs_refresh" ]]; then
-        echo "错误：lark-cli 认证已过期，请先运行: lark-cli auth login --domain calendar,task,docs,drive" >&2
+        echo "错误：lark-cli 认证已过期，请先运行: lark-cli auth login --domain calendar,docs,drive,contact,vc,im" >&2
         exit 1
     fi
 }
@@ -191,11 +201,12 @@ collect_im() {
 }
 
 collect_conversations() {
-    local env_args=()
     if [[ -n "${WORKSPACE_DIR:-}" ]]; then
-        env_args=(env "WORKSPACE_DIR=$WORKSPACE_DIR")
+        env "WORKSPACE_DIR=$WORKSPACE_DIR" python3 "$SCRIPT_DIR/collect-conversations.py" "${1:-$TODAY}" 2>/dev/null \
+            || echo '{"conversations":[],"naomi_memory":null,"total_sessions":0}'
+        return
     fi
-    "${env_args[@]}" python3 "$SCRIPT_DIR/collect-conversations.py" "${1:-$TODAY}" 2>/dev/null \
+    python3 "$SCRIPT_DIR/collect-conversations.py" "${1:-$TODAY}" 2>/dev/null \
         || echo '{"conversations":[],"naomi_memory":null,"total_sessions":0}'
 }
 
@@ -225,7 +236,9 @@ collect_meetings() {
     if [[ -n "$meeting_ids" && "$meeting_ids" != "" ]]; then
         local raw_notes
         raw_notes=$(lark-cli vc +notes --meeting-ids "$meeting_ids" 2>&1 | grep -v '^\[vc') || raw_notes='{}'
-        notes_map=$(echo "$raw_notes" | jq -c 'reduce (.data.notes[]? // empty) as $n ({}; . + {($n.meeting_id): ("https://xd.feishu.cn/docx/" + $n.note_doc_token)})' 2>/dev/null) || notes_map='{}'
+        local base_url
+        base_url="$(feishu_base_url)"
+        notes_map=$(echo "$raw_notes" | jq -c --arg base "$base_url" 'reduce (.data.notes[]? // empty) as $n ({}; . + {($n.meeting_id): ($base + "/docx/" + $n.note_doc_token)})' 2>/dev/null) || notes_map='{}'
     fi
 
     local events
@@ -567,7 +580,7 @@ cmd_create() {
     if [[ -z "${FIRST_REPORT_DONE:-}" ]]; then
         echo "" >&2
         echo "🎉 你的第一份自动化日报已生成！从此告别手动建文档。" >&2
-        echo "   如果觉得好用，记得请远夏喝杯咖啡。" >&2
+        echo "   如果觉得好用，可以给仓库点一个 star。" >&2
         echo "" >&2
         echo "FIRST_REPORT_DONE=true" >> "$CONF_FILE"
     fi
@@ -748,7 +761,7 @@ cmd_digest() {
                 for pat in "${date_patterns[@]}"; do
                     # 2a: Markdown 链接 [日报标题](https://.../wiki/TOKEN)，兼容 URL 编码 %2F
                     linked_token=$(echo "$root_md" | grep -F "$pat" | \
-                        grep -oE 'feishu\.cn(/|%2F)wiki(/|%2F)[A-Za-z0-9]+' | head -1 | sed -E 's|.*wiki/||; s|.*wiki%2F||' || true)
+                        grep -oE '(feishu\.cn|larkoffice\.com)(/|%2F)wiki(/|%2F)[A-Za-z0-9]+' | head -1 | sed -E 's|.*wiki/||; s|.*wiki%2F||' || true)
                     if [[ -n "$linked_token" ]]; then
                         break
                     fi
@@ -764,7 +777,7 @@ cmd_digest() {
                     obj_token="$linked_token"
                     doc_title="$name $target_date"
                     node_token_doc=""
-                    url="https://xd.feishu.cn/wiki/${linked_token}"
+                    url="$(feishu_url "wiki/${linked_token}")"
                 fi
             fi
         fi
@@ -779,7 +792,7 @@ cmd_digest() {
             | jq -r '.data.markdown // ""' 2>/dev/null) || content=""
 
         if [[ -z "$url" && -n "$node_token_doc" ]]; then
-            url="https://xd.feishu.cn/wiki/${node_token_doc}"
+            url="$(feishu_url "wiki/${node_token_doc}")"
         fi
 
         reports=$(echo "$reports" | jq -c --arg name "$name" --arg title "$doc_title" --arg content "$content" --arg url "$url" \
@@ -809,7 +822,6 @@ cmd_digest() {
 cmd_credits() {
     cat << 'EOF'
 日报自动化 v1.0
-作者：远夏（邱一鸣）
 技术栈：bash + lark-cli + AI Agent
 
 本工具接受咖啡形式的 star ⭐
